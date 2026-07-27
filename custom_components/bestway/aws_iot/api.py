@@ -43,6 +43,11 @@ API_ENDPOINTS = {
     "CN": "https://smarthub.bestwaycorp.cn",  # Note: .cn domain!
     # "DEV": "http://bestway.dev.mxchip.com.cn",  # Dev/Test only
 }
+REGION_LOCATIONS = {
+    "EU": "GB",
+    "US": "US",
+    "CN": "CN",
+}
 
 
 class AwsIotException(Exception):
@@ -257,7 +262,6 @@ class AwsIotApi:
             "accept-language": "en",
             "sign": sign,
             "Authorization": "token",
-            "Host": "smarthub-eu.bestwaycorp.com",
             "Connection": "Keep-Alive",
             "User-Agent": "okhttp/4.9.0",
             "Content-Type": "application/json; charset=UTF-8",
@@ -266,22 +270,19 @@ class AwsIotApi:
         url = f"{api_base}/api/enduser/visitor"
 
         _LOGGER.debug("Authenticating visitor %s", visitor_id[:12])
-        _LOGGER.debug("Payload: %s", payload)
-        _LOGGER.debug("Nonce in headers: %s", "nonce" in headers)
-        _LOGGER.debug("Sign in headers: %s", "sign" in headers)
-        _LOGGER.debug("All header keys: %s", list(headers.keys()))
 
         async with asyncio.timeout(TIMEOUT):
-            async with session.post(
-                url, headers=headers, json=payload, ssl=False
-            ) as resp:
+            async with session.post(url, headers=headers, json=payload) as resp:
                 data = await resp.json()
-                _LOGGER.debug("Auth response: %s", data)
                 _LOGGER.debug("Response status: %s", resp.status)
                 token = data.get("data", {}).get("token")
 
                 if not token:
-                    _LOGGER.error("No token in response. Full response: %s", data)
+                    _LOGGER.error(
+                        "No token in authentication response (code=%s, message=%s)",
+                        data.get("code"),
+                        data.get("message"),
+                    )
                     raise AwsIotAuthException("No token in authentication response")
 
                 return str(token)
@@ -337,9 +338,9 @@ class AwsIotApi:
         url = f"{api_base}/api/enduser/grant_device"
 
         async with asyncio.timeout(TIMEOUT):
-            response = await session.post(url, headers=headers, json=payload, ssl=False)
+            response = await session.post(url, headers=headers, json=payload)
 
-            if response.status in (400, 401, 4001, 4002):
+            if response.status in (400, 401):
                 raise AwsIotException("QR code invalid, expired, or already used")
 
             response.raise_for_status()
@@ -377,7 +378,6 @@ class AwsIotApi:
             "accept-language": "en",
             "sign": signature,
             "Authorization": f"token {self._token}",  # "token" not "Bearer"!
-            "Host": "smarthub-eu.bestwaycorp.com",
             "Connection": "Keep-Alive",
             "User-Agent": "okhttp/4.9.0",
             "Content-Type": "application/json; charset=UTF-8",
@@ -402,7 +402,7 @@ class AwsIotApi:
         _LOGGER.debug("GET %s", path)
 
         async with asyncio.timeout(TIMEOUT):
-            async with self._session.get(url, headers=headers, ssl=False) as response:
+            async with self._session.get(url, headers=headers) as response:
                 data = await response.json()
 
                 # Check for errors
@@ -434,9 +434,7 @@ class AwsIotApi:
         _LOGGER.debug("POST %s", path)
 
         async with asyncio.timeout(TIMEOUT):
-            async with self._session.post(
-                url, headers=headers, json=data, ssl=False
-            ) as response:
+            async with self._session.post(url, headers=headers, json=data) as response:
                 result = await response.json()
 
                 _LOGGER.debug(
@@ -459,10 +457,9 @@ class AwsIotApi:
         Populates self.devices with all discovered devices.
 
         Discovery flow:
-        1. GET /api/enduser/homes → list of homes
-        2. For each home: GET /api/enduser/home/rooms?home_id=X → rooms
-        3. For each room: GET /api/enduser/home/room/devices?room_id=Y → devices
-        4. Create BestwayDevice for each device with backend=BACKEND_AWS_IOT
+        1. GET /api/enduser/devices for account-level and shared devices
+        2. Fall back to homes → rooms → devices for older API variants
+        3. Create BestwayDevice for every unique device
 
         Note: Device discovery is cached after first successful run.
         Devices are only re-discovered if device list is empty.
@@ -475,11 +472,29 @@ class AwsIotApi:
 
         _LOGGER.debug("Discovering devices for visitor %s", self._visitor_id[:12])
 
-        discovered_devices = []
+        discovered_devices: list[dict[str, Any]] = []
 
-        # Step 1: Get homes
+        # Shared devices are not guaranteed to be assigned to a room. Prefer the
+        # account-level endpoint so those devices are not silently omitted.
+        devices_response = await self._do_get("/api/enduser/devices")
+        if devices_response.get("code") == 0:
+            discovered_devices = devices_response.get("data", {}).get("list", [])
+            _LOGGER.debug(
+                "Found %d device(s) via account-level discovery",
+                len(discovered_devices),
+            )
+        else:
+            _LOGGER.warning(
+                "Account-level device discovery failed: %s",
+                devices_response.get("message"),
+            )
+
+        if discovered_devices:
+            self._store_discovered_devices(discovered_devices)
+            return
+
+        # Fall back to the hierarchical API used by older app versions.
         homes_response = await self._do_get("/api/enduser/homes")
-        _LOGGER.debug("Homes API response: %s", homes_response)
 
         # Check for API error code
         if homes_response.get("code") != 0:
@@ -492,8 +507,9 @@ class AwsIotApi:
         # Step 2 & 3: Get rooms and devices for each home
         for home in homes:
             home_id = home.get("id")  # EXACT reference field name
-            home_name = home.get("name", "Unknown")
-            _LOGGER.debug("Processing home: %s (id=%s)", home_name, home_id)
+            if not home_id:
+                _LOGGER.warning("Skipping home without an id")
+                continue
 
             # Get rooms in this home
             rooms_response = await self._do_get(
@@ -506,12 +522,13 @@ class AwsIotApi:
                 continue
 
             rooms = rooms_response.get("data", {}).get("list", [])
-            _LOGGER.debug("Found %d room(s) in home %s", len(rooms), home_name)
+            _LOGGER.debug("Found %d room(s) in a home", len(rooms))
 
             for room in rooms:
                 room_id = room.get("id")  # EXACT reference field name
-                room_name = room.get("name", "Unknown")
-                _LOGGER.debug("Processing room: %s (id=%s)", room_name, room_id)
+                if not room_id:
+                    _LOGGER.warning("Skipping room without an id")
+                    continue
 
                 # Get devices in this room
                 devices_response = await self._do_get(
@@ -524,19 +541,34 @@ class AwsIotApi:
                     continue
 
                 devices = devices_response.get("data", {}).get("list", [])
-                _LOGGER.debug("Found %d device(s) in room %s", len(devices), room_name)
+                _LOGGER.debug("Found %d device(s) in a room", len(devices))
                 discovered_devices.extend(devices)
 
-        _LOGGER.info("Discovered %d devices", len(discovered_devices))
+        self._store_discovered_devices(discovered_devices)
 
-        # Convert to BestwayDevice format
+    def _store_discovered_devices(
+        self, discovered_devices: list[dict[str, Any]]
+    ) -> None:
+        """Validate, deduplicate, and store discovered devices."""
+        unique_devices = {
+            device["device_id"]: device
+            for device in discovered_devices
+            if device.get("device_id")
+        }
+        skipped = len(discovered_devices) - len(unique_devices)
+        if skipped:
+            _LOGGER.warning(
+                "Skipped %d duplicate or malformed device record(s)", skipped
+            )
+
+        _LOGGER.info("Discovered %d unique device(s)", len(unique_devices))
         self.devices = {}
-        for dev in discovered_devices:
+        for dev in unique_devices.values():
             device_id = dev["device_id"]
-            product_id = dev.get("product_id", "UNKNOWN").strip()  # e.g., "T53NN8"
+            product_id = str(dev.get("product_id") or "UNKNOWN").strip()
             product_series = (
-                dev.get("product_series", "AIRJET").strip().replace(" ", "_")
-            )  # Normalize spaces to underscores
+                str(dev.get("product_series") or "UNKNOWN").strip().replace(" ", "_")
+            )
 
             device = BestwayDevice(
                 protocol_version=2,  # V02 protocol
@@ -728,7 +760,6 @@ class AwsIotApi:
                 f"{self._api_base}/api/v2/device/command",
                 headers=headers,  # Use SAME headers with matching sign!
                 json=body,
-                ssl=False,
             ) as response:
                 result = await response.json()
                 _LOGGER.debug(

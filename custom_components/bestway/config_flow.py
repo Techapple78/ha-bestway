@@ -239,12 +239,13 @@ class BestwayConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
         try:
-            from .aws_iot.api import AwsIotApi, API_ENDPOINTS
+            from .aws_iot.api import API_ENDPOINTS, REGION_LOCATIONS, AwsIotApi
 
             session = async_get_clientsession(self.hass)
 
             # Map region to API endpoint
             api_base = API_ENDPOINTS.get(region, API_ENDPOINTS["EU"])
+            location = REGION_LOCATIONS.get(region, REGION_LOCATIONS["EU"])
 
             # Determine visitor_id
             if qr_code:
@@ -267,7 +268,7 @@ class BestwayConfigFlow(ConfigFlow, domain=DOMAIN):
 
                 # Authenticate to get token
                 token = await AwsIotApi.authenticate(
-                    session, visitor_id, api_base=api_base
+                    session, visitor_id, location=location, api_base=api_base
                 )
 
                 # Bind QR code to visitor account
@@ -306,7 +307,7 @@ class BestwayConfigFlow(ConfigFlow, domain=DOMAIN):
 
                 # Authenticate to get token
                 token = await AwsIotApi.authenticate(
-                    session, visitor_id, api_base=api_base
+                    session, visitor_id, location=location, api_base=api_base
                 )
 
             # Test by discovering devices
@@ -314,6 +315,7 @@ class BestwayConfigFlow(ConfigFlow, domain=DOMAIN):
                 session=session,
                 visitor_id=visitor_id,
                 token=token,
+                location=location,
                 api_base=api_base,
             )
 
@@ -331,7 +333,7 @@ class BestwayConfigFlow(ConfigFlow, domain=DOMAIN):
                         "backend": BACKEND_AWS_IOT,
                         "visitor_id": visitor_id,
                         "token": token,
-                        "location": "GB",  # Legacy field
+                        "location": location,
                         "region": region,
                         "api_base": api_base,
                     },

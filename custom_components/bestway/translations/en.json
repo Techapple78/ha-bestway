@@ -19,11 +19,11 @@
       },
       "aws_iot_auth": {
         "title": "Bestway V02 Login (AWS IoT)",
-        "description": "Choose setup method: Use an existing visitor_id OR scan a QR code to create a new account. Provide ONE option only.",
+        "description": "Paste the text decoded from a fresh Device Sharing QR code (it starts with RW_Share_). The advanced visitor ID option only accepts an API visitor ID previously created by this integration or extracted from API traffic; the Guest ID shown in the app will not work.",
         "data": {
           "region": "Region",
-          "visitor_id": "Visitor ID (existing account, optional)",
-          "qr_code": "QR Code (new account, optional)"
+          "visitor_id": "Advanced API visitor ID (optional)",
+          "qr_code": "Decoded RW_Share_ QR text (recommended)"
         }
       }
     },
@@ -38,7 +38,7 @@
       "invalid_qr_format": "Invalid QR code format. QR code must start with 'RW_Share_'.",
       "invalid_format": "Invalid QR code format. QR code must start with 'RW_Share_'.",
       "binding_failed": "QR code binding failed. The code may be expired or already used. Generate a fresh QR code from your spa.",
-      "no_devices_found": "No devices found. Please check your spa is powered on and connected.",
+      "no_devices_found": "No devices are bound to this API visitor. Do not use the Guest ID shown in the app; paste the text from a fresh RW_Share_ Device Sharing QR code instead.",
       "qr_code_required": "Either provide an existing visitor_id OR scan a QR code. One option is required.",
       "unknown": "Unknown error"
     }

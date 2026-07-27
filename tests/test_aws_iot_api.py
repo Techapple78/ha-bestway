@@ -73,10 +73,7 @@ def test_signature_different_for_different_inputs(aws_api):
 
 @pytest.mark.asyncio
 async def test_refresh_bindings_discovers_devices(aws_api, mock_session):
-    """Test device discovery populates devices dict."""
-    # Patch _do_get to return properly structured API responses
-    homes_data = {"code": 0, "data": {"list": [{"id": "home1", "name": "My Home"}]}}
-    rooms_data = {"code": 0, "data": {"list": [{"id": "room1", "name": "Garden"}]}}
+    """Test account-level device discovery populates devices dict."""
     devices_data = {
         "code": 0,
         "data": {
@@ -93,7 +90,7 @@ async def test_refresh_bindings_discovers_devices(aws_api, mock_session):
         },
     }
 
-    aws_api._do_get = AsyncMock(side_effect=[homes_data, rooms_data, devices_data])
+    aws_api._do_get = AsyncMock(return_value=devices_data)
 
     # Execute
     await aws_api.refresh_bindings()
@@ -108,11 +105,12 @@ async def test_refresh_bindings_discovers_devices(aws_api, mock_session):
     assert device.backend == "aws_iot"
     assert device.protocol_version == 2
     assert device.ws_host == "eu-central-1"  # Region stored in ws_host
+    aws_api._do_get.assert_awaited_once_with("/api/enduser/devices")
 
 
 @pytest.mark.asyncio
 async def test_refresh_bindings_multiple_devices(aws_api, mock_session):
-    """Test discovery of multiple devices across rooms."""
+    """Test hierarchical fallback discovers multiple devices across rooms."""
     # 1 home, 2 rooms, 1 device per room
     homes_data = {"code": 0, "data": {"list": [{"id": "home1", "name": "My Home"}]}}
     rooms_data = {
@@ -154,7 +152,13 @@ async def test_refresh_bindings_multiple_devices(aws_api, mock_session):
     }
 
     aws_api._do_get = AsyncMock(
-        side_effect=[homes_data, rooms_data, devices1_data, devices2_data]
+        side_effect=[
+            {"code": 0, "data": {"list": []}},
+            homes_data,
+            rooms_data,
+            devices1_data,
+            devices2_data,
+        ]
     )
 
     await aws_api.refresh_bindings()
@@ -164,6 +168,60 @@ async def test_refresh_bindings_multiple_devices(aws_api, mock_session):
     assert "device2" in aws_api.devices
     assert aws_api.devices["device1"].alias == "Spa 1"
     assert aws_api.devices["device2"].alias == "Spa 2"
+
+
+@pytest.mark.asyncio
+async def test_refresh_bindings_discovers_shared_device_without_room(
+    aws_api, mock_session
+):
+    """Test account-level discovery includes a shared device without a room."""
+    devices_data = {
+        "code": 0,
+        "data": {
+            "list": [
+                {
+                    "device_id": "shared-device",
+                    "device_alias": "Shared Spa",
+                    "product_series": "ULTRAFIT AIRJET",
+                    "product_id": "UNKNOWN_MODEL",
+                    "service_region": "eu-central-1",
+                    "is_online": True,
+                }
+            ]
+        },
+    }
+    aws_api._do_get = AsyncMock(return_value=devices_data)
+
+    await aws_api.refresh_bindings()
+
+    assert list(aws_api.devices) == ["shared-device"]
+    assert aws_api.devices["shared-device"].product_series == "ULTRAFIT_AIRJET"
+    aws_api._do_get.assert_awaited_once_with("/api/enduser/devices")
+
+
+@pytest.mark.asyncio
+async def test_refresh_bindings_keeps_unknown_model_generic(aws_api, mock_session):
+    """Test missing model metadata is not incorrectly treated as an Airjet."""
+    devices_data = {
+        "code": 0,
+        "data": {
+            "list": [
+                {
+                    "device_id": "new-model",
+                    "device_alias": "Future Spa",
+                    "service_region": "eu-central-1",
+                    "is_online": True,
+                }
+            ]
+        },
+    }
+    aws_api._do_get = AsyncMock(return_value=devices_data)
+
+    await aws_api.refresh_bindings()
+
+    device = aws_api.devices["new-model"]
+    assert device.product_id == "UNKNOWN"
+    assert device.product_series == "UNKNOWN"
 
 
 def test_normalize_state_comprehensive():
